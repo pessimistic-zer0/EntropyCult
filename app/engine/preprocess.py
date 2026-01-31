@@ -11,6 +11,8 @@ import base64
 from urllib.parse import unquote
 from typing import Dict, Any, List, Tuple
 
+from app.engine.confusables import normalize_confusables, detect_confusables
+
 # Zero-width and invisible Unicode characters to strip
 ZERO_WIDTH_CHARS = frozenset([
     '\u200b', '\u200c', '\u200d', '\u2060', '\ufeff', '\u00ad', '\u034f',
@@ -115,11 +117,24 @@ def preprocess(text: str) -> Dict[str, Any]:
     Main preprocessing function.
     Returns: clean_text, decoded_layers, obfuscation_flags
     """
+    # Step 1: Remove zero-width characters
     no_zw = remove_zero_width(text)
     zw_removed = len(text) != len(no_zw)
 
-    clean_text = normalize_unicode(no_zw)
+    # Step 2: Detect confusables BEFORE normalization to catch all obfuscation
+    # (NFKC normalizes some like superscripts/math, but we still want to flag them)
+    confusables_info = detect_confusables(no_zw)
+    
+    # Step 3: Apply NFKC normalization (handles fullwidth, some math symbols, etc.)
+    nfkc_text = normalize_unicode(no_zw)
+    
+    # Step 4: Normalize remaining confusables (Cyrillic, Greek, etc. that NFKC misses)
+    clean_text = normalize_confusables(nfkc_text)
+    
+    # Detect mixed scripts on original text
     is_mixed, scripts = detect_mixed_script(text)
+    
+    # Extract decoded layers from original text
     decoded_layers = extract_decoded_layers(text)
 
     obfuscation_flags = {
@@ -128,10 +143,15 @@ def preprocess(text: str) -> Dict[str, Any]:
         'scripts_detected': scripts,
         'base64_detected': any(l['type'] == 'base64' for l in decoded_layers),
         'url_encoded_detected': any(l['type'] == 'url_encoded' for l in decoded_layers),
+        'confusables_detected': confusables_info['has_confusables'],
+        'confusables_count': confusables_info['count'],
+        'confusables_categories': confusables_info['categories'],
     }
 
     return {
         'clean_text': clean_text,
         'decoded_layers': decoded_layers,
         'obfuscation_flags': obfuscation_flags,
+        'confusables_info': confusables_info,
     }
+

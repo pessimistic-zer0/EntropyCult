@@ -61,7 +61,8 @@ INJECTION_PATTERNS: List[tuple] = [
 ]
 
 
-def detect_signals(text: str, decoded_layers: List[Dict] = None) -> List[Signal]:
+def detect_signals(text: str, decoded_layers: List[Dict] = None, 
+                   obfuscation_flags: Dict[str, Any] = None) -> List[Signal]:
     """Run all heuristic detectors on text and decoded layers."""
     signals = []
     seen = set()
@@ -80,6 +81,24 @@ def detect_signals(text: str, decoded_layers: List[Dict] = None) -> List[Signal]
             if match:
                 signals.append({'name': name, 'weight': weight, 'evidence': match.group()[:80]})
                 seen.add(name)
+
+    # Add signal for confusables (homoglyph obfuscation attempt)
+    if obfuscation_flags and obfuscation_flags.get('confusables_detected'):
+        count = obfuscation_flags.get('confusables_count', 0)
+        categories = obfuscation_flags.get('confusables_categories', [])
+        
+        # Higher weight for more confusables or suspicious categories
+        weight = 15  # Base weight
+        if count > 5:
+            weight += 10
+        if 'math_alphanumeric' in categories or 'cyrillic' in categories:
+            weight += 10  # These are commonly used in attacks
+        
+        signals.append({
+            'name': 'confusables_obfuscation',
+            'weight': min(weight, 35),  # Cap at 35
+            'evidence': f'{count} confusable chars detected ({", ".join(categories)})'
+        })
 
     return signals
 
