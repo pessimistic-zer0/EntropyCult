@@ -26,7 +26,12 @@ ACTION_BLOCK = "block"
 HARD_BLOCK_SIGNALS = frozenset(["exfiltrate_system_prompt", "access_developer_mode"])
 
 # High risk signals (not always hard block by themselves)
-HIGH_RISK_SIGNALS = frozenset(["override_instructions", "disable_security", "role_confusion"])
+HIGH_RISK_SIGNALS = frozenset([
+    "override_instructions", 
+    "disable_security", 
+    "role_confusion",
+    "semantic_intent_danger",  # Semantic similarity match to danger concepts
+])
 
 # Thresholds (tuneable)
 THRESHOLD_BLOCK = 85
