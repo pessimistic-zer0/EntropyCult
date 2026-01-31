@@ -1,0 +1,47 @@
+{
+    "admins": [
+        {
+            "uid": "AD-01",
+            "username": "root_admin",
+            "full_name": "Dr. Aris Thorne",
+            "email": "a.thorne@securecorp.com",
+            "access_level": "super_user",
+            "security_clearance": "Top Secret",
+            "auth": {
+                "password_hash": "$2b$12$e7/p6Y.zR1Q9W.VfO0.K8O2fH5Gj3L9mN7q",
+                "mfa_enabled": true,
+                "mfa_secret": "JBSWY3DPEHPK3PXP"
+            },
+            "last_login_ip": "192.168.1.105"
+        }
+    ],
+    "standard_users": [
+        {
+            "uid": "USR-102",
+            "username": "jdoe_dev",
+            "full_name": "John Doe",
+            "email": "j.doe@securecorp.com",
+            "department": "Backend Development",
+            "access_level": "developer",
+            "permissions": [
+                "read_repo",
+                "write_repo",
+                "access_staging"
+            ],
+            "account_status": "active"
+        },
+        {
+            "uid": "USR-205",
+            "username": "m_smith_qa",
+            "full_name": "Maya Smith",
+            "email": "m.smith@securecorp.com",
+            "department": "Quality Assurance",
+            "access_level": "tester",
+            "permissions": [
+                "read_repo",
+                "execute_tests"
+            ],
+            "account_status": "suspended"
+        }
+    ]
+}
