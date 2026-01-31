@@ -1,12 +1,13 @@
+# app/engine/policy.py
 """
-Policy decision engine - maps detection results to defense actions.
+Policy decision engine for prompt injection defense.
+Maps detection results to defense actions: allow, sanitize, reprompt, block.
 
-Upgrades vs previous version:
-- Reduces false positives when the user is *quoting/discussing* injection phrases (e.g. “it says: ignore previous…”).
-- Makes SANITIZE reachable for “mixed benign + injection” prompts by raising the hard BLOCK threshold.
-- Keeps HARD BLOCK for prompt/system/developer exfiltration attempts.
-- Treats mixed-script as an *escalator* (adds strictness) but not an automatic block at medium risk.
-- Returns classification directly (so orchestrator can use it consistently).
+Features:
+- Reduces false positives for quoted/discussed injection phrases
+- Supports multi-turn context (reprompt_count, pivot_detected)
+- Escalation rules for persistent attackers
+- Returns classification directly for consistency
 """
 
 from __future__ import annotations
@@ -28,17 +29,18 @@ HARD_BLOCK_SIGNALS = frozenset(["exfiltrate_system_prompt", "access_developer_mo
 HIGH_RISK_SIGNALS = frozenset(["override_instructions", "disable_security", "role_confusion"])
 
 # Thresholds (tuneable)
-# - Keep hard-block for explicit exfil signals regardless of score.
-# - Raise block threshold so "override only" can sanitize/reprompt instead of always block.
 THRESHOLD_BLOCK = 85
 THRESHOLD_SANITIZE = 40
 
-# If mixed-script obfuscation is present, we tighten thresholds slightly (escalation).
+# Mixed-script escalation
 MIXED_SCRIPT_BLOCK_DELTA = 10
 MIXED_SCRIPT_SANITIZE_DELTA = 5
 
-# Benign discussion / quotation contexts that often include injection phrases safely.
-# This is a pragmatic hackathon heuristic to reduce false positives.
+# Pivot escalation
+PIVOT_BLOCK_DELTA = 15
+PIVOT_SANITIZE_DELTA = 10
+
+# Benign discussion / quotation contexts
 BENIGN_QUOTE_CONTEXT_RE = re.compile(
     r"\b("
     r"what does that mean|"
@@ -61,10 +63,7 @@ BENIGN_QUOTE_CONTEXT_RE = re.compile(
 
 
 def _is_benign_quote_context(message: str) -> bool:
-    """
-    Heuristic: user appears to be discussing/quoting an injection phrase,
-    not issuing it as an instruction.
-    """
+    """Check if user is discussing/quoting an injection phrase."""
     return bool(BENIGN_QUOTE_CONTEXT_RE.search(message))
 
 
@@ -74,14 +73,26 @@ def decide_action(
     sanitized_has_content: bool,
     obfuscation_flags: Dict[str, Any],
     message: str | None = None,
+    # Multi-turn context (optional for backwards compatibility)
+    reprompt_count: int = 0,
+    pivot_detected: bool = False,
 ) -> Dict[str, Any]:
     """
     Decide defense action based on detection results.
 
-    Returns a dict with:
-      - action: allow|sanitize|reprompt|block
-      - reason: human-readable reason
-      - classification: benign|uncertain|malicious
+    Args:
+        risk_score: The effective risk score (may include history pressure)
+        signals: Current message signals
+        sanitized_has_content: Whether sanitized message has meaningful content
+        obfuscation_flags: Detected obfuscation techniques
+        message: Original message (for quote context detection)
+        reprompt_count: Number of times user was reprompted (for escalation)
+        pivot_detected: Whether a benign→malicious pivot was detected
+
+    Returns dict with:
+        - action: allow|sanitize|reprompt|block
+        - reason: human-readable reason
+        - classification: benign|uncertain|malicious
     """
     signal_names = {s.get("name", "") for s in signals}
 
@@ -97,34 +108,46 @@ def decide_action(
         }
 
     # -------------------------------------------------------------------------
-    # Optional: context-aware downgrade for quoted/discussed injection phrases
+    # Context-aware downgrade for quoted/discussed injection phrases
     # -------------------------------------------------------------------------
     benign_quote = bool(message) and _is_benign_quote_context(message)
 
-    # Example: user asks "In this text file it says: ignore previous instructions. What does that mean?"
-    # We should not immediately block; ask them to clarify or treat as uncertain.
-    if benign_quote:
-        # If it's only an override-like phrase, reprompt rather than block/sanitize.
-        # If there are multiple strong signals (e.g., disable_security + role_confusion), still act.
+    if benign_quote and not pivot_detected:
         high_risk_found = signal_names & HIGH_RISK_SIGNALS
         if high_risk_found and len(high_risk_found) == 1 and "override_instructions" in high_risk_found:
             return {
                 "action": ACTION_REPROMPT,
-                "reason": "Detected injection phrase in a likely quoted/discussion context; asking for clarification.",
+                "reason": "Injection phrase in likely quoted context; asking for clarification.",
                 "classification": "uncertain",
             }
 
     # -------------------------------------------------------------------------
-    # Escalate thresholds slightly if mixed-script obfuscation detected
+    # Compute dynamic thresholds based on context
     # -------------------------------------------------------------------------
     block_threshold = THRESHOLD_BLOCK
     sanitize_threshold = THRESHOLD_SANITIZE
+
+    # Tighten thresholds for mixed-script obfuscation
     if obfuscation_flags.get("mixed_script") or obfuscation_flags.get("mixed_script_detected"):
-        block_threshold = max(0, block_threshold - MIXED_SCRIPT_BLOCK_DELTA)
-        sanitize_threshold = max(0, sanitize_threshold - MIXED_SCRIPT_SANITIZE_DELTA)
+        block_threshold -= MIXED_SCRIPT_BLOCK_DELTA
+        sanitize_threshold -= MIXED_SCRIPT_SANITIZE_DELTA
+
+    # Tighten thresholds significantly on pivot (sneaky attack pattern)
+    if pivot_detected:
+        block_threshold -= PIVOT_BLOCK_DELTA
+        sanitize_threshold -= PIVOT_SANITIZE_DELTA
+
+    # Tighten on repeated reprompts (escalation)
+    if reprompt_count >= 2:
+        block_threshold -= 10
+        sanitize_threshold -= 5
+
+    # Ensure thresholds stay reasonable
+    block_threshold = max(50, block_threshold)
+    sanitize_threshold = max(20, sanitize_threshold)
 
     # -------------------------------------------------------------------------
-    # Rule 2: Multiple high-risk signals => block (high confidence)
+    # Rule 2: Multiple high-risk signals => block
     # -------------------------------------------------------------------------
     high_risk_found = signal_names & HIGH_RISK_SIGNALS
     if len(high_risk_found) >= 2:
@@ -138,9 +161,12 @@ def decide_action(
     # Rule 3: Very high risk score => block
     # -------------------------------------------------------------------------
     if risk_score >= block_threshold:
+        reason = f"Risk score {risk_score} >= {block_threshold}"
+        if pivot_detected:
+            reason += " (pivot detected)"
         return {
             "action": ACTION_BLOCK,
-            "reason": f"Risk score {risk_score} >= {block_threshold}",
+            "reason": reason,
             "classification": "malicious",
         }
 
@@ -151,12 +177,12 @@ def decide_action(
         if sanitized_has_content:
             return {
                 "action": ACTION_SANITIZE,
-                "reason": "Medium risk; sanitizing detected injection-like segments while preserving task.",
+                "reason": "Medium risk; sanitizing while preserving task.",
                 "classification": "uncertain",
             }
         return {
             "action": ACTION_REPROMPT,
-            "reason": "Medium risk but sanitization removed too much content; requesting clean restatement.",
+            "reason": "Medium risk but no content after sanitization.",
             "classification": "uncertain",
         }
 
@@ -173,7 +199,7 @@ def decide_action(
 def get_classification(risk_score: int) -> str:
     """
     Backwards-compatible helper.
-    Prefer using the classification returned by decide_action() for consistency.
+    Prefer using the classification returned by decide_action().
     """
     if risk_score >= 60:
         return "malicious"
