@@ -61,15 +61,18 @@ Respond with a JSON object ONLY (no markdown, no explanation):
 }"""
 
 
-def _format_history(history: List[str], max_turns: int = 3) -> str:
-    """Format conversation history for the judge (last 3 turns)."""
+def _format_history(history: List[str], max_turns: Optional[int] = None) -> str:
+    """Format conversation history for the judge (all turns by default)."""
     if not history:
         return "No previous conversation history."
     
-    recent = history[-max_turns:]
+    # Use all history if max_turns is None, otherwise slice
+    recent = history if max_turns is None else history[-max_turns:]
     formatted = []
     for i, turn in enumerate(recent, 1):
-        formatted.append(f"Turn {i}: {turn[:500]}...")
+        # Show full turn content (truncate at 1000 chars for very long messages)
+        content = turn[:1000] + "..." if len(turn) > 1000 else turn
+        formatted.append(f"Turn {i}: {content}")
     return "\n".join(formatted)
 
 

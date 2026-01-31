@@ -39,7 +39,7 @@ from app.engine.layer_integration import build_layer_outputs, compute_layer1_con
 logger = logging.getLogger(__name__)
 
 # Multi-turn configuration
-MAX_HISTORY_TURNS = 6        # How many past turns to analyze
+MAX_HISTORY_TURNS = None     # Send ALL history (no limit)
 HISTORY_PRESSURE_CAP = 20    # Max pressure from history
 HIGH_RISK_SIGNAL_NAMES = frozenset([
     "override_instructions",
