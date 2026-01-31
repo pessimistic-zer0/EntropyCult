@@ -37,37 +37,53 @@ class MLDefense:
     
     def __init__(self):
         """
-        Initialize the model and tokenizer.
-        Only runs once due to Singleton pattern.
+        Initialize the MLDefense wrapper.
+        Actual model loading is deferred until first use (lazy loading).
         """
         if MLDefense._initialized:
             return
         
-        # Detect device - prefer CUDA GPU
+        self.device = None
+        self.tokenizer = None
+        self.model = None
+        self.id2label = None
+        self._model_loaded = False
+        
+        MLDefense._initialized = True
+        logger.info("MLDefense wrapper initialized (lazy loading active)")
+
+    def _load_model(self):
+        """Load the model and tokenizer if not already loaded."""
+        if self._model_loaded:
+            return
+
+        logger.info(f"Loading model: {self.MODEL_NAME}...")
+        print(f"📦 Loading model: {self.MODEL_NAME}...")
+
+        # Detect device
         if torch.cuda.is_available():
             self.device = torch.device("cuda:0")
             device_name = torch.cuda.get_device_name(0)
-            logger.info(f"MLDefense: Using GPU - {device_name}")
-            print(f"🚀 MLDefense initialized on GPU: {device_name}")
+            print(f"🚀 MLDefense using GPU: {device_name}")
         else:
             self.device = torch.device("cpu")
-            logger.info("MLDefense: CUDA not available, using CPU")
-            print("⚠️ MLDefense initialized on CPU (CUDA not available)")
-        
-        # Load tokenizer and model
-        logger.info(f"Loading model: {self.MODEL_NAME}")
-        print(f"📦 Loading model: {self.MODEL_NAME}...")
-        
-        self.tokenizer = AutoTokenizer.from_pretrained(self.MODEL_NAME)
-        self.model = AutoModelForSequenceClassification.from_pretrained(self.MODEL_NAME)
-        
-        # Move model to device and set to evaluation mode
-        self.model.to(self.device)
-        self.model.eval()
-        
-        # Cache the label mapping from model config
-        # protectai model uses: 0=SAFE, 1=INJECTION
-        self.id2label = self.model.config.id2label
+            print("⚠️ MLDefense using CPU")
+
+        # Load artifacts
+        try:
+            self.tokenizer = AutoTokenizer.from_pretrained(self.MODEL_NAME)
+            self.model = AutoModelForSequenceClassification.from_pretrained(self.MODEL_NAME)
+            
+            # Move to device and optimize
+            self.model.to(self.device)
+            self.model.eval()
+            self.id2label = self.model.config.id2label
+            
+            self._model_loaded = True
+            logger.info("Model loaded successfully")
+        except Exception as e:
+            logger.error(f"Failed to load ML model: {e}")
+            raise e
         
         logger.info("MLDefense model loaded successfully")
         print("✅ MLDefense model loaded successfully!")
@@ -87,6 +103,11 @@ class MLDefense:
                 - confidence_score: float - 0.0 to 1.0 confidence
                 - label: str - "SAFE" or "INJECTION"
         """
+        # LAZY LOAD: Ensure model is loaded before use
+        if not self._model_loaded:
+            logger.info("First use detected - triggering lazy model load...")
+            self._load_model()
+            
         if not text or not text.strip():
             return {
                 "is_malicious": False,
@@ -149,6 +170,10 @@ class MLDefense:
         Returns:
             List of result dictionaries
         """
+        # LAZY LOAD: Ensure model is loaded before use
+        if not self._model_loaded:
+            self._load_model()
+            
         if not texts:
             return []
         

@@ -113,18 +113,20 @@ class ConversationStore:
     def get_last_turns(
         self,
         conversation_id: str,
-        max_turns: int = MAX_TURNS
+        max_turns: Optional[int] = MAX_TURNS
     ) -> List[Dict[str, Any]]:
         """
         Get the last N turns as list of dicts.
         Returns empty list if conversation doesn't exist.
+        If max_turns is None, returns all turns.
         """
         with self._lock:
             self._cleanup_expired()
             if conversation_id not in self._store:
                 return []
             state = self._get_or_create(conversation_id)
-            turns = state.turns[-max_turns:]
+            # If max_turns is None, return all turns
+            turns = state.turns if max_turns is None else state.turns[-max_turns:]
             return [
                 {
                     "role": t.role,
@@ -138,7 +140,7 @@ class ConversationStore:
     def get_context_text(
         self,
         conversation_id: str,
-        max_turns: int = MAX_TURNS
+        max_turns: Optional[int] = MAX_TURNS
     ) -> str:
         """
         Get conversation history as formatted text for analysis.

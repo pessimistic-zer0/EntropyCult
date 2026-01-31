@@ -21,6 +21,10 @@ This is the single entrypoint used by the API route:
 
 from __future__ import annotations
 
+# Load .env FIRST before any other imports that might need env vars
+from dotenv import load_dotenv
+load_dotenv()
+
 import logging
 from typing import Any, Dict, List, Optional
 
@@ -35,8 +39,12 @@ from app.engine.sanitize import (
 from app.engine.policy import decide_action, get_classification
 from app.engine.memory import conversation_store
 from app.engine.layer_integration import build_layer_outputs, compute_layer1_confidence
+from app.engine.pipeline import SecurityScanner
 
 logger = logging.getLogger(__name__)
+
+# Initialize the centralized scanner
+scanner = SecurityScanner()
 
 # Multi-turn configuration
 MAX_HISTORY_TURNS = None     # Send ALL history (no limit)
@@ -266,7 +274,7 @@ def analyze_message(
 ) -> Dict[str, Any]:
     """
     Main entry point for the defense gateway.
-    Returns dict matching AnalyzeResponse schema.
+    Uses SecurityScanner (Layers 1-3) for detection and decision making.
     """
     timer = Timer()
     timer.start()
@@ -278,12 +286,14 @@ def analyze_message(
         history_turns = conversation_store.get_last_turns(
             conversation_id, max_turns=MAX_HISTORY_TURNS
         )
-        conv_stats = conversation_store.get_stats(conversation_id)
-        reprompt_count = conv_stats.get("reprompt_count", 0)
-        recent_signals = conversation_store.get_recent_signals(conversation_id, max_turns=3)
+        history_context = conversation_store.get_context_text(
+            conversation_id, max_turns=MAX_HISTORY_TURNS
+        )
+        # Convert history list for scanner (strings only)
+        history_list = [t.get("text", "") for t in history_turns]
 
     # =========================================================================
-    # Stage 1: Preprocessing / Deobfuscation (current message)
+    # Stage 1: Preprocessing / Deobfuscation
     # =========================================================================
     with timer.stage("preprocess"):
         prep_result = preprocess(message)
@@ -292,181 +302,110 @@ def analyze_message(
         obfuscation_flags: Dict[str, Any] = prep_result["obfuscation_flags"]
 
     # =========================================================================
-    # Stage 2: Signal Detection on CURRENT message
+    # Stage 2: Security Scanner (Layers 1, 2, 2.5, 3)
     # =========================================================================
-    with timer.stage("signals_current"):
-        current_signals = detect_signals(clean_text, decoded_layers)
-        current_risk = calculate_risk_score(current_signals)
-
-    # =========================================================================
-    # Stage 3: Signal Detection on HISTORY context (separate analysis)
-    # =========================================================================
-    with timer.stage("signals_history"):
-        history_context = conversation_store.get_context_text(
-            conversation_id, max_turns=MAX_HISTORY_TURNS
+    # We pass CLEAN text to the scanner to catch obfuscated attacks
+    with timer.stage("scan"):
+        scan_result = scanner.scan(
+            text=clean_text, 
+            session_history=history_list,
+            skip_layer3=False # Always allow escalation to Judge
         )
-        if history_context:
-            # Light analysis of history - just detect signals, no preprocessing
-            history_signals = detect_signals(history_context, [])
-            history_risk = calculate_risk_score(history_signals)
-        else:
-            history_signals = []
-            history_risk = 0
+    
+    # =========================================================================
+    # Post-Processing: Map ScanResult to Legacy Schema
+    # =========================================================================
+    # Synthesize "signals" list for frontend visualization
+    current_signals = []
+    
+    # 1. Layer 1 Signals
+    if scan_result.details.get("layer1"):
+        l1 = scan_result.details["layer1"]
+        current_signals.append({
+            "name": l1.get("category", "regex_match"),
+            "weight": 100,
+            "evidence": l1.get("evidence", "Pattern matched"),
+            "layer": 1
+        })
+        
+    # 2. Semantic Signals
+    semantic_res = scan_result.details.get("semantic", {})
+    if semantic_res.get("is_dangerous"):
+        current_signals.append({
+            "name": "semantic_intent_danger",
+            "weight": int(semantic_res.get("max_similarity", 0) * 100),
+            "evidence": f"Matched concept: '{semantic_res.get('matched_concept')}'",
+            "layer": 2.5
+        })
+        
+    # 3. ML Signals
+    ml_res = scan_result.details.get("layer2", {})
+    if ml_res.get("is_malicious"):
+        current_signals.append({
+            "name": "ml_injection_detected",
+            "weight": int(ml_res.get("confidence_score", 0) * 100),
+            "evidence": f"Confidence: {ml_res.get('confidence_score', 0):.2%}",
+            "layer": 2
+        })
+
+    # Calculate scores
+    current_risk = int(scan_result.confidence * 100) if scan_result.is_malicious else 0
+    if not current_risk and current_signals:
+         # If no malicious flag but signals present, take max weight
+         current_risk = max([s["weight"] for s in current_signals])
+
+    effective_risk = current_risk  # Base effective risk on current risk
 
     # =========================================================================
-    # Stage 3.5: Semantic Intent Detection (catches synonym attacks)
-    # =========================================================================
-    semantic_result = {"is_dangerous": False, "max_similarity": 0.0, "matched_concept": None}
-    with timer.stage("semantic_check"):
-        try:
-            detector = get_semantic_detector()
-            semantic_result = detector.check(clean_text)
-            
-            # If semantic danger detected, add a synthetic signal and boost risk
-            if semantic_result["is_dangerous"]:
-                similarity = semantic_result["max_similarity"]
-                
-                # Dynamic weight based on similarity:
-                # - 0.35-0.50: weight 50 (triggers sanitize at risk 50)
-                # - 0.50-0.70: weight 70 (higher risk)
-                # - 0.70+:     weight 90 (triggers block at risk 90)
-                if similarity >= 0.70:
-                    weight = 90  # High similarity = very likely malicious
-                elif similarity >= 0.50:
-                    weight = 70  # Medium-high similarity
-                else:
-                    weight = 50  # Just above threshold
-                
-                semantic_signal = {
-                    "name": "semantic_intent_danger",
-                    "weight": weight,
-                    "evidence": f"Matched concept: '{semantic_result['matched_concept']}' "
-                               f"(similarity: {semantic_result['max_similarity']:.2f})"
-                }
-                current_signals.append(semantic_signal)
-                # Recalculate risk with the new signal
-                current_risk = calculate_risk_score(current_signals)
-                logger.info(
-                    f"[SEMANTIC] Danger detected! Weight={weight}, Risk={current_risk}. "
-                    f"Concept: '{semantic_result['matched_concept']}' (sim={similarity:.2f})"
-                )
-        except Exception as e:
-            logger.error(f"Semantic detection error: {e}")
-
-    # =========================================================================
-    # Stage 4: Compute history pressure + effective risk
-    # =========================================================================
-    history_pressure = _compute_history_pressure(history_turns)
-    effective_risk = min(100, current_risk + history_pressure)
-
-    # =========================================================================
-    # Stage 5: Pivot detection
-    # =========================================================================
-    pivot_detected = _detect_pivot(history_turns, current_signals, current_risk)
-    if pivot_detected:
-        # Boost effective risk on pivot
-        effective_risk = min(100, effective_risk + 15)
-
-    # =========================================================================
-    # Stage 6: Sanitization (prepare candidate)
-    # =========================================================================
-    with timer.stage("sanitize"):
-        sanitized_text, was_sanitized, removed_patterns = sanitize_message(
-            clean_text, current_signals
-        )
-        sanitized_has_content = has_meaningful_content(sanitized_text)
-
-    # =========================================================================
-    # Stage 7: Policy Decision (using effective_risk)
-    # =========================================================================
-    with timer.stage("policy"):
-        decision = decide_action(
-            risk_score=effective_risk,  # Use effective risk, not raw
-            signals=current_signals,
-            sanitized_has_content=sanitized_has_content,
-            obfuscation_flags=obfuscation_flags,
-            message=message,
-            # Pass multi-turn context for advanced policy
-            reprompt_count=reprompt_count,
-            pivot_detected=pivot_detected,
-        )
-        action = decision["action"]
-        classification = decision.get("classification", get_classification(effective_risk))
-
-    # =========================================================================
-    # Stage 8: Apply escalation rules
-    # =========================================================================
-    original_action = action
-    action = _apply_escalation(action, reprompt_count, current_risk, current_signals)
-    if action != original_action:
-        decision["reason"] = f"Escalated from {original_action} (reprompt_count={reprompt_count})"
-
-    # =========================================================================
-    # Stage 9: Store turn + mark action
+    # Stage 3: Store turn + action
     # =========================================================================
     with timer.stage("memory_store"):
-        # Store the user turn with detected signals
         signal_names = [s.get("name", "") for s in current_signals]
         conversation_store.add_turn(
             conversation_id,
             role="user",
-            text=message,
+            text=message,  # Store ORIGINAL message
             signals=signal_names
         )
-        # Track action for escalation
-        conversation_store.mark_action(conversation_id, action)
+        conversation_store.mark_action(conversation_id, scan_result.action)
 
     # =========================================================================
-    # Build Response with multi-turn explainability
+    # Build Response
     # =========================================================================
-
-    # Add multi-turn metadata to obfuscation_flags (keeps schema compatible)
-    obfuscation_flags["multi_turn_enabled"] = True
-    obfuscation_flags["turns_used"] = len(history_turns)
-    obfuscation_flags["history_pressure"] = history_pressure
-    obfuscation_flags["effective_risk_score"] = effective_risk
-    obfuscation_flags["current_risk_score"] = current_risk
-    obfuscation_flags["pivot_detected"] = pivot_detected
-    obfuscation_flags["reprompt_count"] = reprompt_count
-    obfuscation_flags["recent_signal_names"] = recent_signals
     
-    # Add semantic detection result
-    obfuscation_flags["semantic_danger_detected"] = semantic_result["is_dangerous"]
-    obfuscation_flags["semantic_similarity"] = semantic_result.get("max_similarity", 0.0)
-    obfuscation_flags["semantic_matched_concept"] = semantic_result.get("matched_concept")
-
-    # =========================================================================
-    # Build Layer 2/3 integration outputs
-    # =========================================================================
-    with timer.stage("layer_outputs"):
-        layer_outputs = build_layer_outputs(
-            clean_text=clean_text,
-            decoded_layers=decoded_layers,
-            signals=current_signals,
-            risk_score=effective_risk,
-            obfuscation_flags=obfuscation_flags,
-            layer1_action=action,
-            conversation_history=history_context or '',
-        )
+    # Update obfuscation flags with new metadata
+    obfuscation_flags["semantic_danger_detected"] = semantic_res.get("is_dangerous", False)
+    obfuscation_flags["semantic_similarity"] = semantic_res.get("max_similarity", 0.0)
+    obfuscation_flags["semantic_matched_concept"] = semantic_res.get("matched_concept")
+    
+    # Classification mapping
+    classification = "malicious" if scan_result.is_malicious else "benign"
+    if 30 < effective_risk < 80:
+        classification = "uncertain"
 
     response: Dict[str, Any] = {
         "conversation_id": conversation_id,
-        "action": action,
+        "action": scan_result.action,
         "classification": classification,
-        "risk_score": effective_risk,  # Report effective risk as main score
+        "risk_score": effective_risk,
         "signals": current_signals,
         "obfuscation_flags": obfuscation_flags,
-        "sanitized_message": sanitized_text if action == "sanitize" else None,
-        "reprompt_message": get_reprompt_message() if action == "reprompt" else None,
+        "sanitized_message": scan_result.sanitized_message, # From LLM
+        "reprompt_message": None, # Reprompt logic deprecated/simplified
         "latency_ms": timer.results(),
         
-        # Layer 2/3 integration
-        "layer1_confidence": layer_outputs["layer1_confidence"],
-        "layer2_input": layer_outputs["layer2_input"],
-        "layer3_prompt_context": layer_outputs["layer3_prompt_context"],
+        # Layer 2/3 integration fields
+        "layer1_confidence": 1.0 if scan_result.details.get("layer1") else 0.5,
+        "layer2_input": {"clean_text": clean_text}, # Simplified
+        "layer3_prompt_context": {
+            "requires_judge": "layer3" in scan_result.details,
+            "escalation_reasons": scan_result.details.get("escalation_reasons", []),
+            "judge_decision": scan_result.details.get("judge_decision"),
+            "sanitization": scan_result.details.get("sanitization")
+        },
     }
 
     # Log the request
-    log_request(conversation_id, action, effective_risk, current_signals)
+    log_request(conversation_id, scan_result.action, effective_risk, current_signals)
 
     return response
