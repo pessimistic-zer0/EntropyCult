@@ -32,6 +32,7 @@ from app.engine.sanitize import (
 )
 from app.engine.policy import decide_action, get_classification
 from app.engine.memory import conversation_store
+from app.engine.layer_integration import build_layer_outputs, compute_layer1_confidence
 
 
 # Multi-turn configuration
@@ -240,6 +241,20 @@ def analyze_message(
     obfuscation_flags["reprompt_count"] = reprompt_count
     obfuscation_flags["recent_signal_names"] = recent_signals
 
+    # =========================================================================
+    # Build Layer 2/3 integration outputs
+    # =========================================================================
+    with timer.stage("layer_outputs"):
+        layer_outputs = build_layer_outputs(
+            clean_text=clean_text,
+            decoded_layers=decoded_layers,
+            signals=current_signals,
+            risk_score=effective_risk,
+            obfuscation_flags=obfuscation_flags,
+            layer1_action=action,
+            conversation_history=history_context or '',
+        )
+
     response: Dict[str, Any] = {
         "conversation_id": conversation_id,
         "action": action,
@@ -250,6 +265,11 @@ def analyze_message(
         "sanitized_message": sanitized_text if action == "sanitize" else None,
         "reprompt_message": get_reprompt_message() if action == "reprompt" else None,
         "latency_ms": timer.results(),
+        
+        # Layer 2/3 integration
+        "layer1_confidence": layer_outputs["layer1_confidence"],
+        "layer2_input": layer_outputs["layer2_input"],
+        "layer3_prompt_context": layer_outputs["layer3_prompt_context"],
     }
 
     # Log the request

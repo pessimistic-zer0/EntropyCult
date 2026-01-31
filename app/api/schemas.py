@@ -24,3 +24,8 @@ class AnalyzeResponse(BaseModel):
     sanitized_message: Optional[str] = None
     reprompt_message: Optional[str] = None
     latency_ms: Dict[str, float]
+    
+    # Layer 2/3 integration fields
+    layer1_confidence: float = Field(default=0.5, description="0-1 confidence score for Layer 1 decision")
+    layer2_input: Optional[Dict[str, Any]] = Field(default=None, description="Structured input for DistilBERT/DeBERTa classifier")
+    layer3_prompt_context: Optional[Dict[str, Any]] = Field(default=None, description="Context for LLM Judge prompt")
