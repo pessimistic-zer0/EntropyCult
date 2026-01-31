@@ -132,6 +132,13 @@ function Message({ message }) {
             <span>({Math.round(data.obfuscation_flags.semantic_similarity * 100)}%)</span>
           </div>
         )}
+
+        {data.action === 'sanitize' && data.sanitized_message && (
+          <div className="sanitized-box">
+            <div className="sanitized-label">🧹 Sanitized Output:</div>
+            <div className="sanitized-content">{data.sanitized_message}</div>
+          </div>
+        )}
       </div>
 
       <div className="card-foot">

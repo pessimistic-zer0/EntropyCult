@@ -307,6 +307,35 @@ body {
   justify-content: space-between;
 }
 
+/* Sanitized Output Box */
+.sanitized-box {
+  margin-top: 12px;
+  padding: 12px;
+  background: rgba(0, 210, 106, 0.08);
+  border: 1px solid rgba(0, 210, 106, 0.3);
+  border-radius: 8px;
+}
+
+.sanitized-label {
+  font-size: 0.75rem;
+  color: var(--green);
+  font-weight: 600;
+  margin-bottom: 8px;
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+}
+
+.sanitized-content {
+  font-size: 0.9rem;
+  color: var(--text);
+  background: rgba(0, 0, 0, 0.3);
+  padding: 10px 12px;
+  border-radius: 6px;
+  font-family: 'SF Mono', 'Cascadia Code', monospace;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
 .loading {
   align-self: flex-start;
   display: flex;
