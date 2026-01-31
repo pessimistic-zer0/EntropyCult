@@ -1,18 +1,18 @@
-# app/engine/policy.py
 """
 Policy decision engine for prompt injection defense.
-Maps detection results to defense actions: allow, sanitize, reprompt, block.
 
 Features:
-- Reduces false positives for quoted/discussed injection phrases
-- Supports multi-turn context (reprompt_count, pivot_detected)
-- Escalation rules for persistent attackers
-- Returns classification directly for consistency
+- Context-aware downgrade: reduces false positives for quoted/discussed phrases
+- Structural awareness: real attacks have imperative structure
+- Multi-turn escalation: repeated attempts trigger stricter responses
+- Behavior-based escalation: historical patterns influence decisions
+- (NEW) ML tie-breaker: logistic regression score used only in ambiguous cases
+
+Actions: allow, sanitize, reprompt, block
 """
 
 from __future__ import annotations
 
-import re
 from typing import Any, Dict, List
 
 
@@ -22,49 +22,33 @@ ACTION_SANITIZE = "sanitize"
 ACTION_REPROMPT = "reprompt"
 ACTION_BLOCK = "block"
 
-# Signals that trigger HARD BLOCK (high confidence malicious intent)
-HARD_BLOCK_SIGNALS = frozenset(["exfiltrate_system_prompt", "access_developer_mode"])
+# Signal categories
+HARD_BLOCK_SIGNALS = frozenset([
+    "exfiltrate_system_prompt",
+    "access_developer_mode",
+])
 
-# High risk signals (not always hard block by themselves)
-HIGH_RISK_SIGNALS = frozenset(["override_instructions", "disable_security", "role_confusion"])
+HIGH_RISK_SIGNALS = frozenset([
+    "override_instructions",
+    "disable_security",
+    "role_confusion",
+    "fake_system_tag",
+    "delimiter_injection",
+])
 
-# Thresholds (tuneable)
+BENIGN_CONTEXT_SIGNALS = frozenset([
+    "benign_quotation_context",
+    "benign_self_correction",
+    "benign_analysis_intent",
+])
+
+# Base thresholds (dynamically adjusted based on context)
 THRESHOLD_BLOCK = 85
 THRESHOLD_SANITIZE = 40
 
-# Mixed-script escalation
-MIXED_SCRIPT_BLOCK_DELTA = 10
-MIXED_SCRIPT_SANITIZE_DELTA = 5
-
-# Pivot escalation
-PIVOT_BLOCK_DELTA = 15
-PIVOT_SANITIZE_DELTA = 10
-
-# Benign discussion / quotation contexts
-BENIGN_QUOTE_CONTEXT_RE = re.compile(
-    r"\b("
-    r"what does that mean|"
-    r"what does this mean|"
-    r"meaning of|"
-    r"explain|"
-    r"definition|"
-    r"in this (text|file|document|log)|"
-    r"it says|"
-    r"the string|"
-    r"this phrase|"
-    r"quoted|"
-    r"example|"
-    r"for research|"
-    r"for analysis|"
-    r"how does prompt injection work"
-    r")\b",
-    re.I,
-)
-
-
-def _is_benign_quote_context(message: str) -> bool:
-    """Check if user is discussing/quoting an injection phrase."""
-    return bool(BENIGN_QUOTE_CONTEXT_RE.search(message))
+# ML thresholds (used as tie-breaker; tuneable)
+ML_BLOCK_THRESHOLD = 0.90
+ML_SUSPICIOUS_THRESHOLD = 0.70
 
 
 def decide_action(
@@ -73,31 +57,27 @@ def decide_action(
     sanitized_has_content: bool,
     obfuscation_flags: Dict[str, Any],
     message: str | None = None,
-    # Multi-turn context (optional for backwards compatibility)
+    # Multi-turn context
     reprompt_count: int = 0,
     pivot_detected: bool = False,
+    # Behavior counters (from orchestrator)
+    behavior_counters: Dict[str, int] | None = None,
+    # Context awareness (from orchestrator)
+    has_benign_context: bool = False,
+    has_imperative_structure: bool = False,
+    # ML tie-breaker
+    ml_score: float | None = None,
 ) -> Dict[str, Any]:
     """
-    Decide defense action based on detection results.
+    Decide defense action based on detection results and context.
 
-    Args:
-        risk_score: The effective risk score (may include history pressure)
-        signals: Current message signals
-        sanitized_has_content: Whether sanitized message has meaningful content
-        obfuscation_flags: Detected obfuscation techniques
-        message: Original message (for quote context detection)
-        reprompt_count: Number of times user was reprompted (for escalation)
-        pivot_detected: Whether a benign→malicious pivot was detected
-
-    Returns dict with:
-        - action: allow|sanitize|reprompt|block
-        - reason: human-readable reason
-        - classification: benign|uncertain|malicious
+    Returns dict with: action, reason, classification
     """
     signal_names = {s.get("name", "") for s in signals}
+    behavior = behavior_counters or {}
 
     # -------------------------------------------------------------------------
-    # Rule 1: Hard block on exfiltration/developer access (always malicious)
+    # Rule 0: HARD BLOCK on exfiltration/developer access (always)
     # -------------------------------------------------------------------------
     hard_block_found = signal_names & HARD_BLOCK_SIGNALS
     if hard_block_found:
@@ -108,46 +88,101 @@ def decide_action(
         }
 
     # -------------------------------------------------------------------------
-    # Context-aware downgrade for quoted/discussed injection phrases
+    # Rule 1: Behavior escalation - prior exfil attempt makes us strict
     # -------------------------------------------------------------------------
-    benign_quote = bool(message) and _is_benign_quote_context(message)
+    if behavior.get("repeat_exfil", 0) >= 1:
+        if signal_names & HIGH_RISK_SIGNALS:
+            return {
+                "action": ACTION_BLOCK,
+                "reason": "Prior exfiltration attempt + current high-risk signals",
+                "classification": "malicious",
+            }
 
-    if benign_quote and not pivot_detected:
-        high_risk_found = signal_names & HIGH_RISK_SIGNALS
-        if high_risk_found and len(high_risk_found) == 1 and "override_instructions" in high_risk_found:
+    # -------------------------------------------------------------------------
+    # Rule 2: Context-aware downgrade for quoted/discussed injection phrases
+    # -------------------------------------------------------------------------
+    has_override = "override_instructions" in signal_names
+    has_other_high_risk = bool((signal_names & HIGH_RISK_SIGNALS) - {"override_instructions"})
+
+    if has_benign_context and has_override and not has_other_high_risk:
+        # If imperative structure is present, it looks like a real command
+        if not has_imperative_structure:
             return {
                 "action": ACTION_REPROMPT,
-                "reason": "Injection phrase in likely quoted context; asking for clarification.",
+                "reason": "Override phrase in benign context (quotation/discussion/self-correction); requesting clarification.",
+                "classification": "uncertain",
+            }
+
+        # -------------------------------------------------------------------------
+    # Rule 2.5: ML tie-breaker (only when present)
+    # -------------------------------------------------------------------------
+    if ml_score is not None:
+        # If ML is extremely confident it's an attack, escalate even if heuristics are mild.
+        if ml_score >= ML_BLOCK_THRESHOLD:
+            # If we don't have any heuristic anchors, "sanitize" can't remove anything safely.
+            if not signal_names:
+                return {
+                    "action": ACTION_REPROMPT,
+                    "reason": f"ML high confidence (p={ml_score:.2f}) but no heuristic anchors; requesting restatement.",
+                    "classification": "malicious",
+                }
+
+            if sanitized_has_content:
+                return {
+                    "action": ACTION_SANITIZE,
+                    "reason": f"ML high confidence (p={ml_score:.2f}); sanitizing suspicious segments.",
+                    "classification": "malicious",
+                }
+            return {
+                "action": ACTION_BLOCK,
+                "reason": f"ML high confidence (p={ml_score:.2f}); blocking.",
+                "classification": "malicious",
+            }
+
+        if ml_score >= ML_SUSPICIOUS_THRESHOLD and risk_score >= 20:
+            if sanitized_has_content:
+                return {
+                    "action": ACTION_SANITIZE,
+                    "reason": f"ML suspicious (p={ml_score:.2f}) + elevated risk; sanitizing.",
+                    "classification": "uncertain",
+                }
+            return {
+                "action": ACTION_REPROMPT,
+                "reason": f"ML suspicious (p={ml_score:.2f}) + elevated risk; requesting restatement.",
                 "classification": "uncertain",
             }
 
     # -------------------------------------------------------------------------
-    # Compute dynamic thresholds based on context
+    # Compute dynamic thresholds
     # -------------------------------------------------------------------------
     block_threshold = THRESHOLD_BLOCK
     sanitize_threshold = THRESHOLD_SANITIZE
 
-    # Tighten thresholds for mixed-script obfuscation
     if obfuscation_flags.get("mixed_script") or obfuscation_flags.get("mixed_script_detected"):
-        block_threshold -= MIXED_SCRIPT_BLOCK_DELTA
-        sanitize_threshold -= MIXED_SCRIPT_SANITIZE_DELTA
+        block_threshold -= 10
+        sanitize_threshold -= 5
 
-    # Tighten thresholds significantly on pivot (sneaky attack pattern)
     if pivot_detected:
-        block_threshold -= PIVOT_BLOCK_DELTA
-        sanitize_threshold -= PIVOT_SANITIZE_DELTA
+        block_threshold -= 15
+        sanitize_threshold -= 10
 
-    # Tighten on repeated reprompts (escalation)
     if reprompt_count >= 2:
         block_threshold -= 10
         sanitize_threshold -= 5
 
-    # Ensure thresholds stay reasonable
-    block_threshold = max(50, block_threshold)
+    if behavior.get("repeat_override", 0) >= 2:
+        block_threshold -= 10
+        sanitize_threshold -= 5
+
+    if has_imperative_structure:
+        block_threshold -= 10
+        sanitize_threshold -= 5
+
+    block_threshold = max(45, block_threshold)
     sanitize_threshold = max(20, sanitize_threshold)
 
     # -------------------------------------------------------------------------
-    # Rule 2: Multiple high-risk signals => block
+    # Rule 3: Multiple high-risk signals => block
     # -------------------------------------------------------------------------
     high_risk_found = signal_names & HIGH_RISK_SIGNALS
     if len(high_risk_found) >= 2:
@@ -158,12 +193,14 @@ def decide_action(
         }
 
     # -------------------------------------------------------------------------
-    # Rule 3: Very high risk score => block
+    # Rule 4: Very high risk score => block
     # -------------------------------------------------------------------------
     if risk_score >= block_threshold:
         reason = f"Risk score {risk_score} >= {block_threshold}"
         if pivot_detected:
             reason += " (pivot detected)"
+        if has_imperative_structure:
+            reason += " (imperative structure)"
         return {
             "action": ACTION_BLOCK,
             "reason": reason,
@@ -171,7 +208,7 @@ def decide_action(
         }
 
     # -------------------------------------------------------------------------
-    # Rule 4: Medium risk => sanitize or reprompt
+    # Rule 5: Medium risk => sanitize or reprompt
     # -------------------------------------------------------------------------
     if risk_score >= sanitize_threshold:
         if sanitized_has_content:
@@ -187,7 +224,17 @@ def decide_action(
         }
 
     # -------------------------------------------------------------------------
-    # Rule 5: Low risk => allow
+    # Rule 6: Low risk but with benign context signals => allow (only if no high-risk)
+    # -------------------------------------------------------------------------
+    if has_benign_context and risk_score > 0 and not (signal_names & HIGH_RISK_SIGNALS):
+        return {
+            "action": ACTION_ALLOW,
+            "reason": "Low risk with benign context (quotation/analysis/self-correction).",
+            "classification": "benign",
+        }
+
+    # -------------------------------------------------------------------------
+    # Rule 7: Low risk => allow
     # -------------------------------------------------------------------------
     return {
         "action": ACTION_ALLOW,

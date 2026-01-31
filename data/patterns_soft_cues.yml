@@ -1,0 +1,123 @@
+# Soft-Cue Patterns for ML Trigger
+# These patterns indicate potential injection but aren't definitive
+# When matched, ML should run as a tie-breaker (even if risk=0)
+
+# =============================================================================
+# PARAPHRASED OVERRIDES - subtle ways to reset context
+# =============================================================================
+paraphrased_override:
+  description: "Paraphrased versions of instruction override"
+  patterns:
+    - id: soft_set_aside_earlier
+      regex: "\\bset\\s+aside\\s+(the\\s+)?(earlier|prior|previous)\\b"
+      description: "set aside earlier"
+    
+    - id: soft_disregard_earlier
+      regex: "\\bdisregard\\s+(the\\s+)?(earlier|prior|previous)\\b"
+      description: "disregard earlier"
+    
+    - id: soft_focus_next
+      regex: "\\bfocus\\s+(only\\s+)?on\\s+what\\s+I\\s+say\\s+next\\b"
+      description: "focus on what I say next"
+    
+    - id: soft_forget_said_before
+      regex: "\\bforget\\s+(everything\\s+)?(I\\s+said\\s+)?(before|earlier|previously)\\b"
+      description: "forget said before"
+    
+    - id: soft_put_aside
+      regex: "\\bput\\s+aside\\s+(what|the)\\s+(came|was\\s+said)\\s+before\\b"
+      description: "put aside what came before"
+    
+    - id: soft_reset_context
+      regex: "\\breset\\s+(your\\s+)?(context|memory|state)\\b"
+      description: "reset your context"
+    
+    - id: soft_start_fresh
+      regex: "\\bstart\\s+(fresh|over|anew)\\b.*\\b(instructions?|context)\\b"
+      description: "start fresh with instructions"
+
+# =============================================================================
+# PARAPHRASED EXFILTRATION - subtle extraction attempts
+# =============================================================================
+paraphrased_exfil:
+  description: "Paraphrased attempts to extract hidden information"
+  patterns:
+    - id: soft_operating_guidelines
+      regex: "\\b(operating|operational)\\s+(guidelines?|rules?)\\b"
+      description: "operating guidelines"
+    
+    - id: soft_hidden_rules
+      regex: "\\bhidden\\s+(rules?|instructions?|guidelines?|prompt)\\b"
+      description: "hidden rules/instructions"
+    
+    - id: soft_initial_config
+      regex: "\\binitial\\s+(configuration|config|setup)\\b"
+      description: "initial configuration"
+    
+    - id: soft_given_at_start
+      regex: "\\bgiven\\s+(at\\s+the\\s+)?(start|beginning)\\s+(of\\s+)?(this\\s+)?conversation\\b"
+      description: "given at start of conversation"
+    
+    - id: soft_what_instructed
+      regex: "\\bwhat\\s+(you\\s+were|were\\s+you)\\s+instructed\\b"
+      description: "what you were instructed"
+    
+    - id: soft_config_dump
+      regex: "\\b(dump|export)\\s+(of\\s+)?(your\\s+)?(initial\\s+)?(configuration|config)\\b"
+      description: "dump configuration"
+    
+    - id: soft_how_you_work
+      regex: "\\b(understand|explain)\\s+how\\s+you\\s+work\\b"
+      description: "understand how you work"
+    
+    - id: soft_behind_scenes
+      regex: "\\b(behind\\s+the\\s+scenes|under\\s+the\\s+hood)\\s+(instructions?|rules?|logic)\\b"
+      description: "behind the scenes instructions"
+
+# =============================================================================
+# AUTHORITY/URGENCY PRESSURE - social engineering cues
+# =============================================================================
+authority_pressure:
+  description: "Authority or urgency-based social engineering"
+  patterns:
+    - id: soft_compliance_audit
+      regex: "\\bcompliance\\s+(audit|requirement|mandates?)\\b"
+      description: "compliance audit"
+    
+    - id: soft_urgent_audit
+      regex: "\\burgent\\b.*\\b(audit|compliance|security)\\b"
+      description: "urgent + audit/compliance"
+    
+    - id: soft_required_by
+      regex: "\\brequired\\s+by\\s+(law|regulation|policy|management)\\b"
+      description: "required by law/policy"
+    
+    - id: soft_authorized
+      regex: "\\bI\\s+am\\s+authorized\\s+to\\b"
+      description: "I am authorized to"
+    
+    - id: soft_admin_access
+      regex: "\\b(as\\s+an?\\s+)?(admin|administrator|supervisor)\\s*(I\\s+need|access)\\b"
+      description: "as admin I need"
+
+# =============================================================================
+# CONTEXT ESCAPE ATTEMPTS - trying to break out of normal flow
+# =============================================================================
+context_escape:
+  description: "Attempts to escape normal conversation context"
+  patterns:
+    - id: soft_end_task
+      regex: "\\b(end|finish|complete)\\s+(this\\s+)?(task|conversation|session)\\s+and\\b"
+      description: "end task and..."
+    
+    - id: soft_new_task
+      regex: "\\bnew\\s+task\\s*:\\b"
+      description: "new task:"
+    
+    - id: soft_actually_instead
+      regex: "\\bactually[,\\s]+(instead|forget\\s+that)\\b"
+      description: "actually instead/forget that"
+    
+    - id: soft_real_request
+      regex: "\\b(my\\s+)?(real|actual|true)\\s+(request|question|task)\\s+(is|:)\\b"
+      description: "my real request is"

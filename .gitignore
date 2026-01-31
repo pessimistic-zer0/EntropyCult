@@ -2,3 +2,8 @@ __pycache__/
 *.pyc
 *.pyo
 *.pyd
+
+# ML artifacts
+models/*.joblib
+models/*.pkl
+models/*.bin

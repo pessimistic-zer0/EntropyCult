@@ -1,91 +1,195 @@
 # app/engine/signals.py
 """
 Heuristic signal detection for prompt injection.
+
+Now uses data-driven patterns from YAML config files:
+- data/patterns_hard_block.yml → high-confidence malicious signals
+- data/patterns_soft_cues.yml → patterns that trigger ML backstop
+
+Categories:
+1. MALICIOUS signals - from YAML config (high weight)
+2. BENIGN CONTEXT signals - hardcoded (indicate quotation/discussion)
+3. STRUCTURAL signals - hardcoded (distinguish real commands from mentions)
+
 Each detector returns signals: {name, weight, evidence}.
 """
 
+from __future__ import annotations
+
 import re
-from typing import List, Dict, Any
+from typing import Any, Dict, List
+
+from app.engine.patterns import detect_hard_block_signals, check_soft_cues
 
 Signal = Dict[str, Any]
 
-# Patterns: (regex, signal_name, weight)
-INJECTION_PATTERNS: List[tuple] = [
-    # Override instructions (Critical)
-    (re.compile(r'ignore\s+(all\s+)?(previous|prior|above|earlier)\s+(instructions?|prompts?|rules?)', re.I),
-     'override_instructions', 60),
-    (re.compile(r'disregard\s+(all\s+)?(previous|prior|above|earlier)', re.I),
-     'override_instructions', 60),
-    (re.compile(r'forget\s+(everything|all|what)\s+(you\s+)?(know|learned|were told)', re.I),
-     'override_instructions', 55),
-    (re.compile(r'new\s+instructions?\s*:', re.I), 'override_instructions', 50),
-    (re.compile(r'from\s+now\s+on[,\s]+(you\s+)?(are|will|must|should)', re.I), 'override_instructions', 45),
 
-    # System prompt exfiltration (Critical)
-    (re.compile(r'(show|reveal|display|print|output|repeat|tell\s+me)\s+(the\s+)?(system\s+prompt|initial\s+prompt)', re.I),
-     'exfiltrate_system_prompt', 70),
-    (re.compile(r'(what|show)\s+(is|are)\s+(your\s+)?(system\s+)?instructions?', re.I),
-     'exfiltrate_system_prompt', 65),
-    (re.compile(r'output\s+(your\s+)?(full\s+)?(system\s+)?prompt', re.I), 'exfiltrate_system_prompt', 65),
+# =============================================================================
+# BENIGN CONTEXT PATTERNS (weight=0, used by policy to downgrade)
+# These stay hardcoded since they're for FP reduction, not attack detection
+# =============================================================================
 
-    # Developer mode access
-    (re.compile(r'(show|reveal|access)\s+(the\s+)?(developer|admin|hidden)\s+(message|mode|panel)', re.I),
-     'access_developer_mode', 60),
-    (re.compile(r'enter\s+(developer|admin|debug|god)\s+mode', re.I), 'access_developer_mode', 55),
+BENIGN_CONTEXT_PATTERNS: List[tuple] = [
+    # Quotation context - user is discussing/quoting text
+    (re.compile(
+        r'\b(it\s+says|in\s+this\s+(file|text|document|log|message|error)|'
+        r'this\s+string|the\s+(phrase|text|message)|'
+        r'found\s+this\s+in|'
+        r'quoted|example|for\s+instance|'
+        r'what\s+does\s+(that|this|it)\s+mean|'
+        r'meaning\s+of|definition\s+of|'
+        r'is\s+this\s+(a\s+)?prompt\s+injection)\b',
+        re.I
+    ), 'benign_quotation_context', 0),
 
-    # Role manipulation
-    (re.compile(r'(you\s+are\s+now|act\s+as|pretend\s+(to\s+be|you\'?re))\s+(a\s+)?(different|new|my)', re.I),
-     'role_confusion', 40),
-    (re.compile(r'(you\s+are|imagine\s+you\'?re)\s+(a\s+)?(jailbroken|unrestricted|unfiltered)', re.I),
-     'role_confusion', 55),
-    (re.compile(r'DAN\s+mode|do\s+anything\s+now', re.I), 'role_confusion', 60),
+    # Also trigger if suspicious phrase is inside quotes
+    (re.compile(
+        r'["\'].*?(ignore|forget|disregard|bypass).*?["\']',
+        re.I
+    ), 'benign_quotation_context', 0),
 
-    # Security bypass
-    (re.compile(r'(bypass|disable|ignore|skip|turn\s+off)\s+(the\s+)?(security|safety|filter|moderation)', re.I),
-     'disable_security', 65),
-    (re.compile(r'(mark|flag|report)\s+(as\s+)?(safe|compliant|approved)\s+(regardless|anyway)', re.I),
-     'disable_security', 60),
+    # Self-correction - user is correcting themselves
+    (re.compile(
+        r'\b(sorry|correction|I\s+meant|'
+        r'let\s+me\s+rephrase|what\s+I\s+meant\s+(was|is)|'
+        r'scratch\s+that|never\s+mind\s+that)\b',
+        re.I
+    ), 'benign_self_correction', 0),
 
-    # Fake system tags
-    (re.compile(r'\[\s*SYSTEM\s*\]|\[\s*ADMIN\s*\]|\[\s*DEV\s*\]', re.I), 'fake_system_tag', 50),
-    (re.compile(r'<\s*system\s*>|<\s*/\s*system\s*>', re.I), 'fake_system_tag', 50),
-
-    # Delimiter injection
-    (re.compile(r'---+\s*(new|real|actual)\s+(instructions?|task|prompt)', re.I), 'delimiter_injection', 45),
-    (re.compile(r'={3,}\s*(ignore\s+above|real\s+task)', re.I), 'delimiter_injection', 45),
-
-    # Context manipulation
-    (re.compile(r'(end|close|terminate)\s+(of\s+)?(the\s+)?(user\s+)?(input|message|prompt)', re.I),
-     'context_manipulation', 40),
-    (re.compile(r'<\s*/\s*(user|input|message)\s*>', re.I), 'context_manipulation', 45),
+    # Analysis intent - user wants to understand prompt injection
+    (re.compile(
+        r'\b(is\s+this\s+(a\s+)?prompt\s+injection|'
+        r'why\s+is\s+this\s+(unsafe|dangerous|malicious)|'
+        r'how\s+does\s+prompt\s+injection\s+work|'
+        r'explain\s+(why|how)\s+this\s+is\s+(malicious|an?\s+attack)|'
+        r'analyze\s+this\s+(for|as)\s+(security|injection)|'
+        r'is\s+this\s+(safe|malicious|an?\s+attack)|'
+        r'what\s+makes\s+this\s+(dangerous|an?\s+injection)|'
+        r'for\s+(research|analysis|testing|educational))\b',
+        re.I
+    ), 'benign_analysis_intent', 0),
 ]
 
 
-def detect_signals(text: str, decoded_layers: List[Dict] = None) -> List[Signal]:
-    """Run all heuristic detectors on text and decoded layers."""
+# =============================================================================
+# STRUCTURAL PATTERNS (help distinguish real commands from mentions)
+# =============================================================================
+
+# Imperative verbs that follow override phrases indicate real attack intent
+IMPERATIVE_VERBS = (
+    r'(reveal|show|display|print|output|tell|give|send|'
+    r'approve|accept|allow|execute|run|do|perform|'
+    r'ignore|forget|disregard|bypass|disable|skip|'
+    r'act|pretend|become|switch|change|'
+    r'write|say|respond|reply|answer|make\s+me\s+understand)'
+)
+
+STRUCTURAL_PATTERNS: List[tuple] = [
+    # Override followed by imperative action = real attack
+    (re.compile(
+        rf'(ignore|forget|disregard)\s+(all\s+)?(previous|prior|above|earlier|everything)\s+'
+        rf'(instructions?|prompts?|rules?|I\s+said)?\s*(and|,|then|now)?\s*{IMPERATIVE_VERBS}',
+        re.I
+    ), 'imperative_override_structure', 25),
+
+    # Direct command structure after override
+    (re.compile(
+        r'(ignore|forget|disregard)\s+.*?\s+(and|,)\s+(instead|now|then)\s+',
+        re.I
+    ), 'imperative_override_structure', 20),
+    
+    # "forget X and Y" where Y is an action
+    (re.compile(
+        r'\bforget\s+everything\s+.*?\s+and\s+(give|show|tell|reveal|make)',
+        re.I
+    ), 'imperative_override_structure', 25),
+]
+
+
+# =============================================================================
+# DETECTION FUNCTIONS
+# =============================================================================
+
+def detect_signals(
+    text: str,
+    decoded_layers: List[Dict] = None,
+    obfuscation_flags: Dict[str, Any] = None
+) -> List[Signal]:
+    """
+    Run all heuristic detectors on text and decoded layers.
+    Returns list of detected signals with name, weight, and evidence.
+    
+    Now uses YAML-based patterns for attack detection.
+    """
     signals = []
     seen = set()
 
+    # Combine main text with decoded content for analysis
     texts_to_check = [text]
     if decoded_layers:
         for layer in decoded_layers:
             if layer.get('decoded'):
                 texts_to_check.append(layer['decoded'])
 
+    # Run YAML-based hard-block pattern detection
     for check_text in texts_to_check:
-        for pattern, name, weight in INJECTION_PATTERNS:
+        yaml_signals = detect_hard_block_signals(check_text)
+        for sig in yaml_signals:
+            if sig['name'] not in seen:
+                signals.append(sig)
+                seen.add(sig['name'])
+
+    # Run hardcoded benign context patterns
+    for check_text in texts_to_check:
+        for pattern, name, weight in BENIGN_CONTEXT_PATTERNS:
             if name in seen:
                 continue
             match = pattern.search(check_text)
             if match:
-                signals.append({'name': name, 'weight': weight, 'evidence': match.group()[:80]})
+                signals.append({
+                    'name': name,
+                    'weight': weight,
+                    'evidence': match.group()[:80],
+                })
                 seen.add(name)
+
+    # Run structural patterns
+    for check_text in texts_to_check:
+        for pattern, name, weight in STRUCTURAL_PATTERNS:
+            if name in seen:
+                continue
+            match = pattern.search(check_text)
+            if match:
+                signals.append({
+                    'name': name,
+                    'weight': weight,
+                    'evidence': match.group()[:80],
+                })
+                seen.add(name)
+
+    # Add obfuscation-based signals if flags present
+    if obfuscation_flags:
+        if obfuscation_flags.get('mixed_script') and 'mixed_script_obfuscation' not in seen:
+            signals.append({
+                'name': 'mixed_script_obfuscation',
+                'weight': 15,
+                'evidence': f"scripts: {obfuscation_flags.get('scripts_detected', [])}",
+            })
+        if obfuscation_flags.get('base64_detected') and 'encoded_payload' not in seen:
+            signals.append({
+                'name': 'encoded_payload',
+                'weight': 10,
+                'evidence': 'base64 content detected',
+            })
 
     return signals
 
 
 def calculate_risk_score(signals: List[Signal]) -> int:
-    """Calculate risk score from signals (sum, capped at 100)."""
+    """
+    Calculate risk score from signals (sum of weights, capped at 100).
+    Note: benign context signals have weight=0 so they don't add to risk.
+    """
     return min(sum(s['weight'] for s in signals), 100)
 
 
@@ -96,3 +200,52 @@ def classify_risk(risk_score: int) -> str:
     elif risk_score >= 25:
         return 'uncertain'
     return 'benign'
+
+
+# =============================================================================
+# HELPER FUNCTIONS FOR POLICY
+# =============================================================================
+
+# Signal categories for policy decisions
+HARD_BLOCK_SIGNAL_NAMES = frozenset([
+    'exfiltrate_system_prompt',
+    'access_developer_mode',
+])
+
+HIGH_RISK_SIGNAL_NAMES = frozenset([
+    'override_instructions',
+    'disable_security',
+    'role_confusion',
+    'fake_system_tag',
+    'delimiter_injection',
+    'context_manipulation',
+])
+
+BENIGN_CONTEXT_SIGNAL_NAMES = frozenset([
+    'benign_quotation_context',
+    'benign_self_correction',
+    'benign_analysis_intent',
+])
+
+
+def has_benign_context(signals: List[Signal]) -> bool:
+    """Check if any benign context signals are present."""
+    signal_names = {s.get('name', '') for s in signals}
+    return bool(signal_names & BENIGN_CONTEXT_SIGNAL_NAMES)
+
+
+def has_hard_block_signals(signals: List[Signal]) -> bool:
+    """Check if any hard-block signals are present."""
+    signal_names = {s.get('name', '') for s in signals}
+    return bool(signal_names & HARD_BLOCK_SIGNAL_NAMES)
+
+
+def has_imperative_structure(signals: List[Signal]) -> bool:
+    """Check if imperative override structure is present (real attack indicator)."""
+    signal_names = {s.get('name', '') for s in signals}
+    return 'imperative_override_structure' in signal_names
+
+
+def get_signal_names(signals: List[Signal]) -> set:
+    """Extract signal names as a set."""
+    return {s.get('name', '') for s in signals}
