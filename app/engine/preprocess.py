@@ -2,42 +2,136 @@
 """
 Preprocessing / Deobfuscation module.
 Handles: NFKC normalization, zero-width removal, mixed-script detection,
-base64 decoding, URL percent-decoding.
+recursive encoding decoding, whitespace normalization, content extraction.
 """
 
 import re
 import unicodedata
-import base64
-from urllib.parse import unquote
 from typing import Dict, Any, List, Tuple
 
 from app.engine.confusables import normalize_confusables, detect_confusables
+from app.engine.decoders import extract_decoded_content, decode_recursive
+from app.engine.content_extraction import extract_all_hidden_content, get_content_for_scanning
 
 # Zero-width and invisible Unicode characters to strip
 ZERO_WIDTH_CHARS = frozenset([
     '\u200b', '\u200c', '\u200d', '\u2060', '\ufeff', '\u00ad', '\u034f',
     '\u061c', '\u115f', '\u1160', '\u17b4', '\u17b5', '\u180e',
-    '\u2000', '\u2001', '\u2002', '\u2003', '\u2004', '\u2005',
-    '\u2006', '\u2007', '\u2008', '\u2009', '\u200a',
-    '\u2028', '\u2029', '\u202a', '\u202b', '\u202c', '\u202d', '\u202e',
-    '\u2062', '\u2063', '\u2064',
 ])
+
+# Dangerous control characters that can manipulate text display
+DANGEROUS_CONTROL_CHARS = frozenset([
+    '\x08',  # Backspace
+    '\x7f',  # Delete
+    '\x00', '\x01', '\x02', '\x03', '\x04', '\x05', '\x06', '\x07',  # Control chars
+    '\x0e', '\x0f', '\x10', '\x11', '\x12', '\x13', '\x14', '\x15',
+    '\x16', '\x17', '\x18', '\x19', '\x1a', '\x1b', '\x1c', '\x1d', '\x1e', '\x1f',
+])
+
+# Bidirectional control characters (RTL override, isolates, etc.)
+BIDI_CONTROL_CHARS = frozenset([
+    '\u200e', '\u200f',  # LRM, RLM
+    '\u202a', '\u202b', '\u202c', '\u202d', '\u202e',  # Bidi overrides
+    '\u2066', '\u2067', '\u2068', '\u2069',  # Bidi isolates
+    '\u2028', '\u2029',  # Line/paragraph separators
+])
+
+# Unicode whitespace characters to normalize to standard space
+UNICODE_WHITESPACE = frozenset([
+    '\u00a0',  # NBSP
+    '\u1680',  # Ogham space
+    '\u2000', '\u2001', '\u2002', '\u2003', '\u2004', '\u2005',  # En/em spaces
+    '\u2006', '\u2007', '\u2008', '\u2009', '\u200a',  # Various thin spaces
+    '\u2028', '\u2029',  # Line/para separator
+    '\u202f',  # Narrow no-break space
+    '\u205f',  # Medium mathematical space
+    '\u3000',  # Ideographic space
+    '\u2062', '\u2063', '\u2064',  # Invisible operators
+])
+
+# All characters to remove completely
+CHARS_TO_REMOVE = ZERO_WIDTH_CHARS | DANGEROUS_CONTROL_CHARS | BIDI_CONTROL_CHARS
 
 # Script detection patterns
 CYRILLIC_PATTERN = re.compile(r'[\u0400-\u04FF]')
 GREEK_PATTERN = re.compile(r'[\u0370-\u03FF]')
 LATIN_PATTERN = re.compile(r'[a-zA-Z]')
 
-# Base64 detection (at least 20 chars, valid base64 alphabet)
-BASE64_PATTERN = re.compile(r'[A-Za-z0-9+/]{20,}={0,2}')
 
-# URL encoding pattern (at least 3 encoded chars)
-URL_ENCODED_PATTERN = re.compile(r'(?:%[0-9A-Fa-f]{2}){3,}')
+def remove_dangerous_chars(text: str) -> Tuple[str, Dict[str, int]]:
+    """Remove zero-width, control, and bidi characters. Track what was removed."""
+    removed_counts = {
+        'zero_width': 0,
+        'control': 0,
+        'bidi': 0,
+    }
+    result = []
+    
+    for char in text:
+        if char in ZERO_WIDTH_CHARS:
+            removed_counts['zero_width'] += 1
+        elif char in DANGEROUS_CONTROL_CHARS:
+            removed_counts['control'] += 1
+        elif char in BIDI_CONTROL_CHARS:
+            removed_counts['bidi'] += 1
+        else:
+            result.append(char)
+    
+    return ''.join(result), removed_counts
 
 
-def remove_zero_width(text: str) -> str:
-    """Remove all zero-width and invisible characters."""
-    return ''.join(c for c in text if c not in ZERO_WIDTH_CHARS)
+def normalize_whitespace(text: str) -> Tuple[str, int]:
+    """Normalize all Unicode whitespace to standard ASCII space."""
+    result = []
+    normalized_count = 0
+    for char in text:
+        if char in UNICODE_WHITESPACE:
+            result.append(' ')
+            normalized_count += 1
+        elif char == '\t':
+            result.append(' ')  # Tab to space
+            normalized_count += 1
+        elif char == '\v':
+            result.append(' ')  # Vertical tab to space
+            normalized_count += 1
+        elif char == '\f':
+            result.append(' ')  # Form feed to space
+            normalized_count += 1
+        else:
+            result.append(char)
+    return ''.join(result), normalized_count
+
+
+def strip_combining_marks(text: str) -> Tuple[str, int]:
+    """
+    Remove combining marks (diacritics) that could disguise text.
+    Preserves legitimate diacritics by only removing suspicious overlay marks.
+    """
+    # Only strip combining marks that are commonly used for obfuscation
+    SUSPICIOUS_COMBINING = {
+        '\u0336', '\u0337', '\u0338',  # Strikethrough/overlays
+        '\u0334', '\u0335',  # Tilde/short stroke overlay
+        '\u0340', '\u0341',  # Grave/acute tone marks
+        '\u0343', '\u0344',  # Combining marks
+        '\u034f',  # Combining grapheme joiner
+    }
+    
+    result = []
+    removed = 0
+    for char in text:
+        if char in SUSPICIOUS_COMBINING:
+            removed += 1
+        elif unicodedata.category(char) == 'Mn' and ord(char) > 0x036F:
+            # Remove combining marks above the common diacritics range
+            # but be conservative - only unusual ranges
+            if 0x1AB0 <= ord(char) <= 0x1AFF or 0x1DC0 <= ord(char) <= 0x1DFF:
+                removed += 1
+            else:
+                result.append(char)
+        else:
+            result.append(char)
+    
+    return ''.join(result), removed
 
 
 def normalize_unicode(text: str) -> str:
@@ -63,95 +157,133 @@ def detect_mixed_script(text: str) -> Tuple[bool, List[str]]:
     return is_mixed, scripts
 
 
-def safe_base64_decode(blob: str, max_len: int = 500) -> str | None:
-    """Attempt to decode a base64 blob safely."""
-    try:
-        padded = blob + '=' * (4 - len(blob) % 4) if len(blob) % 4 else blob
-        decoded = base64.b64decode(padded, validate=True)
-        text = decoded.decode('utf-8', errors='strict')
-        printable_ratio = sum(1 for c in text if c.isprintable() or c.isspace()) / max(len(text), 1)
-        if printable_ratio > 0.8 and len(text) <= max_len:
-            return text
-    except Exception:
-        pass
-    return None
 
-
-def decode_url_encoding(text: str) -> str:
-    """Decode URL percent-encoding."""
-    try:
-        return unquote(text)
-    except Exception:
-        return text
-
-
-def extract_decoded_layers(text: str) -> List[Dict[str, str]]:
-    """Find and decode obfuscated content (base64, URL-encoded)."""
-    layers = []
-
-    for match in BASE64_PATTERN.finditer(text):
-        blob = match.group()
-        decoded = safe_base64_decode(blob)
-        if decoded:
-            layers.append({
-                'type': 'base64',
-                'original': blob[:50] + '...' if len(blob) > 50 else blob,
-                'decoded': decoded
-            })
-
-    for match in URL_ENCODED_PATTERN.finditer(text):
-        segment = match.group()
-        decoded = decode_url_encoding(segment)
-        if decoded != segment:
-            layers.append({
-                'type': 'url_encoded',
-                'original': segment[:50] + '...' if len(segment) > 50 else segment,
-                'decoded': decoded
-            })
-
-    return layers
-
-
-def preprocess(text: str) -> Dict[str, Any]:
+def preprocess(text: str, extract_hidden: bool = True) -> Dict[str, Any]:
     """
     Main preprocessing function.
-    Returns: clean_text, decoded_layers, obfuscation_flags
+    
+    Pipeline:
+    1. Remove dangerous characters (zero-width, control, bidi)
+    2. Normalize whitespace
+    3. Strip suspicious combining marks
+    4. Detect confusables (before NFKC)
+    5. Apply NFKC normalization
+    6. Normalize remaining confusables (Cyrillic, Greek, etc.)
+    7. Recursively decode encoded content
+    8. Extract hidden content from structured formats
+    
+    Returns: clean_text, decoded_layers, obfuscation_flags, additional_content
     """
-    # Step 1: Remove zero-width characters
-    no_zw = remove_zero_width(text)
-    zw_removed = len(text) != len(no_zw)
-
-    # Step 2: Detect confusables BEFORE normalization to catch all obfuscation
-    # (NFKC normalizes some like superscripts/math, but we still want to flag them)
-    confusables_info = detect_confusables(no_zw)
+    # Step 1: Remove dangerous characters
+    sanitized, removed_counts = remove_dangerous_chars(text)
     
-    # Step 3: Apply NFKC normalization (handles fullwidth, some math symbols, etc.)
-    nfkc_text = normalize_unicode(no_zw)
+    # Step 2: Normalize whitespace
+    ws_normalized, ws_normalized_count = normalize_whitespace(sanitized)
     
-    # Step 4: Normalize remaining confusables (Cyrillic, Greek, etc. that NFKC misses)
+    # Step 3: Strip suspicious combining marks
+    no_combining, combining_removed = strip_combining_marks(ws_normalized)
+    
+    # Step 4: Detect confusables BEFORE normalization
+    confusables_info = detect_confusables(no_combining)
+    
+    # Step 5: Apply NFKC normalization
+    nfkc_text = normalize_unicode(no_combining)
+    
+    # Step 6: Normalize remaining confusables
     clean_text = normalize_confusables(nfkc_text)
     
-    # Detect mixed scripts on original text
+    # Step 7: Recursively decode encoded content (on original and cleaned)
+    # Decode from original to catch all encoded payloads
+    decoded_result = extract_decoded_content(text, max_depth=3)
+    
+    # Also decode the cleaned text in case encoding was revealed after normalization
+    decoded_clean = extract_decoded_content(clean_text, max_depth=3)
+    
+    # Merge decoded layers
+    all_decoded_layers = decoded_result['layers'] + [
+        {**layer, 'source': 'post_normalization'} 
+        for layer in decoded_clean['layers']
+        if layer not in decoded_result['layers']
+    ]
+    
+    # Step 8: Extract hidden content from structured formats
+    hidden_content = {}
+    additional_texts = []
+    if extract_hidden:
+        hidden_content = extract_all_hidden_content(text)
+        additional_texts = hidden_content.get('all_content', [])
+        
+        # Also extract from decoded content
+        for layer in all_decoded_layers:
+            if 'decoded' in layer:
+                layer_hidden = extract_all_hidden_content(layer['decoded'])
+                additional_texts.extend(layer_hidden.get('all_content', []))
+    
+    # Detect mixed scripts
     is_mixed, scripts = detect_mixed_script(text)
     
-    # Extract decoded layers from original text
-    decoded_layers = extract_decoded_layers(text)
-
+    # Compile obfuscation flags
     obfuscation_flags = {
-        'zero_width_removed': zw_removed,
+        # Character removal
+        'zero_width_removed': removed_counts['zero_width'] > 0,
+        'zero_width_count': removed_counts['zero_width'],
+        'control_chars_removed': removed_counts['control'] > 0,
+        'control_chars_count': removed_counts['control'],
+        'bidi_removed': removed_counts['bidi'] > 0,
+        'bidi_count': removed_counts['bidi'],
+        'whitespace_normalized': ws_normalized_count > 0,
+        'whitespace_normalized_count': ws_normalized_count,
+        'combining_marks_removed': combining_removed > 0,
+        'combining_marks_count': combining_removed,
+        
+        # Script detection
         'mixed_script': is_mixed,
         'scripts_detected': scripts,
-        'base64_detected': any(l['type'] == 'base64' for l in decoded_layers),
-        'url_encoded_detected': any(l['type'] == 'url_encoded' for l in decoded_layers),
+        
+        # Encoding detection
+        'encoding_detected': decoded_result['was_encoded'],
+        'encoding_types': decoded_result['encoding_types'],
+        'encoding_depth': decoded_result['depth'],
+        
+        # Confusables
         'confusables_detected': confusables_info['has_confusables'],
         'confusables_count': confusables_info['count'],
         'confusables_categories': confusables_info['categories'],
+        
+        # Hidden content
+        'hidden_content_detected': len(additional_texts) > 0,
+        'hidden_content_count': len(additional_texts),
     }
-
+    
+    # Collect all text to scan (clean + decoded + hidden)
+    texts_to_scan = [clean_text]
+    
+    # Add decoded content to scan list
+    if decoded_result['was_encoded']:
+        texts_to_scan.append(decoded_result['decoded_text'])
+    
+    # Add hidden content
+    texts_to_scan.extend(additional_texts)
+    
     return {
         'clean_text': clean_text,
-        'decoded_layers': decoded_layers,
+        'decoded_layers': all_decoded_layers,
         'obfuscation_flags': obfuscation_flags,
         'confusables_info': confusables_info,
+        'hidden_content': hidden_content,
+        'texts_to_scan': texts_to_scan,
+        'fully_decoded_text': decoded_result['decoded_text'] if decoded_result['was_encoded'] else clean_text,
     }
 
+
+# Keep backward compatibility
+def remove_zero_width(text: str) -> str:
+    """Remove all zero-width and invisible characters. (Legacy wrapper)"""
+    result, _ = remove_dangerous_chars(text)
+    return result
+
+
+def extract_decoded_layers(text: str) -> List[Dict[str, str]]:
+    """Extract decoded layers. (Legacy wrapper for backward compatibility)"""
+    result = extract_decoded_content(text, max_depth=3)
+    return result['layers']
