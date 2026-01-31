@@ -49,9 +49,10 @@ def analyze_message(
             signals=signals,
             sanitized_has_content=sanitized_has_content,
             obfuscation_flags=obfuscation_flags,
+            message=message,  # optional but recommended if policy supports it
         )
         action = decision['action']
-        classification = get_classification(risk_score)
+        classification = decision.get('classification', get_classification(risk_score))
 
     # Build Response
     response: Dict[str, Any] = {
