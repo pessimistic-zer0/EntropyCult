@@ -1,0 +1,116 @@
+<!DOCTYPE html>
+<html lang="en">
+
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Defense Gateway | EntropyCult</title>
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link
+        href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap"
+        rel="stylesheet">
+    <link rel="stylesheet" href="/static/style.css">
+</head>
+
+<body>
+    <div class="background-glow"></div>
+
+    <div class="container">
+        <header>
+            <div class="logo">
+                <svg width="24" height="24" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg">
+                    <path d="M12 2L2 7L12 12L22 7L12 2Z" stroke="currentColor" stroke-width="2" stroke-linecap="round"
+                        stroke-linejoin="round" />
+                    <path d="M2 17L12 22L22 17" stroke="currentColor" stroke-width="2" stroke-linecap="round"
+                        stroke-linejoin="round" />
+                    <path d="M2 12L12 17L22 12" stroke="currentColor" stroke-width="2" stroke-linecap="round"
+                        stroke-linejoin="round" />
+                </svg>
+                <span>Defense Gateway</span>
+            </div>
+            <div class="status-indicator">
+                <span class="dot"></span>
+                System Online
+            </div>
+        </header>
+
+        <main>
+            <section class="input-section">
+                <h1>Prompt Analysis</h1>
+                <p class="subtitle">Enter a prompt to analyze for injection attacks and malicious intent.</p>
+
+                <div class="input-wrapper">
+                    <textarea id="promptInput" placeholder="Enter your prompt here..." spellcheck="false"></textarea>
+                    <div class="input-footer">
+                        <button id="clearBtn" class="secondary-btn">Clear</button>
+                        <button id="analyzeBtn" class="primary-btn">
+                            <span>Analyze Prompt</span>
+                            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor"
+                                stroke-width="2">
+                                <path d="M5 12h14M12 5l7 7-7 7" />
+                            </svg>
+                        </button>
+                    </div>
+                </div>
+            </section>
+
+            <section class="results-section hidden" id="resultsSection">
+                <div class="cards-grid">
+                    <!-- Main Decision Card -->
+                    <div class="card decision-card">
+                        <h2>Action Taken</h2>
+                        <div class="action-display" id="actionDisplay">
+                            <span class="action-icon"></span>
+                            <span class="action-text">--</span>
+                        </div>
+                    </div>
+
+                    <!-- Risk Score Card -->
+                    <div class="card score-card">
+                        <h2>Risk Score</h2>
+                        <div class="score-dial">
+                            <svg viewBox="0 0 100 50" class="gauge">
+                                <path d="M10 50 A 40 40 0 0 1 90 50" class="gauge-bg" />
+                                <path d="M10 50 A 40 40 0 0 1 90 50" class="gauge-fill" id="gaugeFill"
+                                    stroke-dasharray="0 126" />
+                            </svg>
+                            <div class="score-value" id="riskScore">0</div>
+                            <div class="score-label">/ 100</div>
+                        </div>
+                        <div class="classification" id="classification">--</div>
+                    </div>
+
+                    <!-- Signals Card -->
+                    <div class="card signals-card">
+                        <h2>Detected Signals</h2>
+                        <div class="signals-list" id="signalsList">
+                            <div class="empty-state">No analysis data yet</div>
+                        </div>
+                    </div>
+                </div>
+
+                <!-- Obfuscation & Details -->
+                <div class="details-grid">
+                    <div class="card details-card">
+                        <h2>Obfuscation Analysis</h2>
+                        <div class="flags-grid" id="obfuscationFlags">
+                            <!-- Populated by JS -->
+                        </div>
+                    </div>
+
+                    <div class="card latency-card">
+                        <h2>Latency Breakdown</h2>
+                        <div class="latency-bars" id="latencyBars">
+                            <!-- Populated by JS -->
+                        </div>
+                    </div>
+                </div>
+            </section>
+        </main>
+    </div>
+
+    <script src="/static/app.js"></script>
+</body>
+
+</html>
